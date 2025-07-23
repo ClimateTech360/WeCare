@@ -1,5 +1,7 @@
 streamlit
-firebase-admin
+bcrypt
 pandas
 numpy
+matplotlib
+seaborn
 scikit-learn
