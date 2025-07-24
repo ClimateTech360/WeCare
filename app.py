@@ -1,14 +1,27 @@
 import streamlit as st
 import sqlite3
 import bcrypt
+import os
 from datetime import datetime
+from PIL import Image
+import openai
 
-# --- 1. Database Utilities (from db_utils.py) ---
+# --- SET OPENAI API KEY ---
+# Ensure you have your OpenAI API key in Streamlit secrets.toml
+# Example secrets.toml:
+# [openai]
+# api_key = "YOUR_OPENAI_API_KEY"
+try:
+    openai.api_key = st.secrets["openai"]["api_key"]
+except KeyError:
+    st.error("OpenAI API key not found in Streamlit secrets.toml. Please add it.")
+    st.stop()  # Stop execution if API key is not found
+
+# --- 1. Database Utilities ---
 
 
 def connect_db():
     """Establishes a connection to the SQLite database."""
-    # check_same_thread=False is needed for Streamlit's multi-threading nature
     return sqlite3.connect("wecare.db", check_same_thread=False)
 
 
@@ -47,6 +60,17 @@ def create_tables():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(post_id) REFERENCES posts(id),
             FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+    """)
+    # Volunteers table for the directory
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS volunteers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            role TEXT NOT NULL,
+            bio TEXT,
+            image_path TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
     conn.commit()
@@ -124,7 +148,28 @@ def get_comments(post_id):
     conn.close()
     return comments
 
-# --- 2. Utility Functions (from utils.py) ---
+
+def add_volunteer(name, role, bio, image_path):
+    """Adds a new volunteer to the database."""
+    conn = connect_db()
+    c = conn.cursor()
+    c.execute("INSERT INTO volunteers (name, role, bio, image_path) VALUES (?, ?, ?, ?)",
+              (name, role, bio, image_path))
+    conn.commit()
+    conn.close()
+
+
+def get_volunteers():
+    """Retrieves all registered volunteers."""
+    conn = connect_db()
+    c = conn.cursor()
+    c.execute(
+        "SELECT name, role, bio, image_path, timestamp FROM volunteers ORDER BY timestamp DESC")
+    volunteers = c.fetchall()
+    conn.close()
+    return volunteers
+
+# --- 2. Utility Functions ---
 
 
 def hash_password(password):
@@ -147,7 +192,53 @@ def moderate_content(text):
     text_lower = text.lower()
     return any(word in text_lower for word in FORBIDDEN_WORDS)
 
-# --- 3. Page Functions (from pages/*.py) ---
+
+# --- AI CHAT FUNCTIONS ---
+DISTRESS_KEYWORDS = [
+    "end it", "kill myself", "can't cope", "suicidal", "self harm",
+    "overdose", "overdosed", "harm myself", "harm others",
+    "want to die", "hopeless", "worthless", "no point"
+]
+
+# Emergency response message (generalized for open platform)
+EMERGENCY_RESPONSE = (
+    "🚨 It sounds like you might be in serious distress. Please know you're not alone. "
+    "Here are some emergency contacts and steps you can take immediately:\n\n"
+    "- **Kenya Red Cross Mental Health Hotline:** 1199 (24/7)\n"
+    "- **Befrienders Kenya:** +254 722 178177 (7 AM - 7 PM)\n"
+    "- **EMKF Suicide Prevention & Crisis Helpline:** 0800 723 253\n"
+    "- Or dial your **local emergency services (e.g., 999 or 112 in Kenya)**.\n\n"
+    "**Please reach out to a professional or trusted person right away. You deserve support.**\n\n"
+    "_I’m an AI and cannot provide medical diagnosis or crisis intervention. Please seek immediate human professional help._"
+)
+
+
+def detect_distress_ai(message):
+    """Checks if a message contains any distress keywords."""
+    message = message.lower()
+    return any(keyword in message for keyword in DISTRESS_KEYWORDS)
+
+
+def generate_ai_response(user_input):
+    """Generates an AI response based on user input using OpenAI's GPT model."""
+    if detect_distress_ai(user_input):
+        return EMERGENCY_RESPONSE
+
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4",  # Or "gpt-3.5-turbo" for lower cost/faster response
+            messages=[
+                {"role": "system", "content": "You are a friendly, empathetic, and supportive mental health assistant. Provide general advice and encourage users to seek professional help when appropriate. Do not provide medical diagnoses or replace professional therapy."},
+                {"role": "user", "content": user_input}
+            ],
+            max_tokens=300,
+            temperature=0.7
+        )
+        return response.choices[0].message["content"].strip()
+    except Exception as e:
+        return f"⚠️ I'm sorry, I'm having trouble connecting right now. Please try again later. Error: {str(e)}"
+
+# --- 3. Page Functions ---
 
 # --- Login & Registration Page ---
 
@@ -173,9 +264,9 @@ def login_page():
                 st.session_state.logged_in = True
                 st.session_state.username = user[1]
                 st.session_state.user_id = user[0]
-                st.session_state.user_role = user[3]  # Store user role
+                st.session_state.user_role = user[3]
                 st.success(f"Login successful! Welcome, {user[1]}!")
-                st.rerun()  # Use st.rerun() instead of st.switch_page() for single-file apps
+                st.rerun()
             else:
                 st.error("Invalid username or password.")
 
@@ -206,53 +297,7 @@ def login_page():
                 except Exception as e:
                     st.error(f"An error occurred during registration: {e}")
 
-
 # --- AI Helper Chatbot Page ---
-# Distress keyword list (broadened for open platform)
-DISTRESS_KEYWORDS = [
-    "end it", "kill myself", "can't cope", "suicidal", "self harm",
-    "overdose", "overdosed", "harm myself", "harm others",
-    "want to die", "hopeless", "worthless", "no point"
-]
-
-# Emergency response message (generalized for open platform)
-EMERGENCY_RESPONSE = (
-    "🚨 It sounds like you might be in serious distress. Please know you're not alone. "
-    "Here are some emergency contacts and steps you can take immediately:\n\n"
-    "- **Kenya Red Cross Mental Health Hotline:** 1199 (24/7)\n"
-    "- **Befrienders Kenya:** +254 722 178177 (7 AM - 7 PM)\n"
-    "- **EMKF Suicide Prevention & Crisis Helpline:** 0800 723 253\n"
-    "- Or dial your **local emergency services (e.g., 999 or 112 in Kenya)**.\n\n"
-    "**Please reach out to a professional or trusted person right away. You deserve support.**\n\n"
-    "_I’m an AI and cannot provide medical diagnosis or crisis intervention. Please seek immediate human professional help._"
-)
-
-
-def detect_distress_ai(message):
-    """Checks if a message contains any distress keywords."""
-    message = message.lower()
-    return any(keyword in message for keyword in DISTRESS_KEYWORDS)
-
-
-def generate_ai_response(user_input):
-    """Generates an AI response based on user input."""
-    if detect_distress_ai(user_input):
-        return EMERGENCY_RESPONSE
-
-    # Simulated general support
-    if "anxiety" in user_input.lower():
-        return "It’s okay to feel anxious sometimes. Try to take slow, deep breaths. Would you like me to guide you through a simple breathing exercise? You can also explore our Educational Hub for articles on managing anxiety."
-    elif "addiction" in user_input.lower() or "alcohol" in user_input.lower() or "drugs" in user_input.lower():
-        return "Recovery is a journey, and you're not alone. Consider visiting the Peer Support Forum to connect with others on a similar path. Remember, professional help is also available."
-    elif "stress" in user_input.lower():
-        return "Stress can be tough. Sometimes a short break or mindfulness exercise can help. Our Educational Hub has great tips for stress management."
-    elif "sad" in user_input.lower() or "depressed" in user_input.lower():
-        return "It sounds like you're feeling down. Please remember that it's okay to ask for help. Sharing in the forum or exploring our resources on depression might be a start."
-    else:
-        return "I'm here to listen. You can share more about what's on your mind. You can also explore the Educational Hub for information or connect with others in the Forum."
-
-    # TODO: Replace this with a more advanced NLP model (e.g., HuggingFace Transformer)
-    # to provide personalized and context-aware responses in the future.
 
 
 def ai_helper_page():
@@ -295,7 +340,7 @@ def forum_page():
     with st.form("post_form"):
         content = st.text_area("What's on your mind?")
         anonymous = st.checkbox("Post anonymously?", value=False)
-        submit = st.form_submit_button("Post")
+        submit = st.form_submit_button("Post")  # No 'key' here
 
         if submit:
             if not content.strip():
@@ -306,7 +351,7 @@ def forum_page():
             else:
                 add_post(st.session_state.user_id, content, int(anonymous))
                 st.success("Post submitted!")
-                st.rerun()  # Rerun to refresh posts list
+                st.rerun()
 
     st.divider()
     st.subheader("📋 Recent Posts")
@@ -333,12 +378,14 @@ def forum_page():
                             f"- **{comment_user}**: {c[1]}  _(at {datetime.strptime(c[2], '%Y-%m-%d %H:%M:%S').strftime('%I:%M %p')})_")
 
                 # Add comment form
-                # clear_on_submit to reset text area
+                # The 'key' for st.form is necessary when in a loop
                 with st.form(f"comment_form_{post_id}", clear_on_submit=True):
+                    # The 'key' for st.text_area is necessary when in a loop
                     comment_input = st.text_area(
                         "Add a comment", key=f"ci_{post_id}", height=70)
-                    submit_comment = st.form_submit_button(
-                        "Submit Comment", key=f"btn_{post_id}")
+                    # The 'key' for st.form_submit_button is NOT needed here in modern Streamlit
+                    # as the form's key handles it implicitly.
+                    submit_comment = st.form_submit_button("Submit Comment")
                     if submit_comment:
                         if not comment_input.strip():
                             st.warning("Comment can't be empty.")
@@ -349,7 +396,7 @@ def forum_page():
                             add_comment(
                                 post_id, st.session_state.user_id, comment_input)
                             st.success("Comment added!")
-                            st.rerun()  # Rerun to refresh comments
+                            st.rerun()
 
 # --- Educational Hub Page ---
 
@@ -374,35 +421,33 @@ def educational_hub_page():
     st.subheader("📖 Featured Articles")
     with st.expander("📌 Understanding Anxiety"):
         st.markdown("""
-        Anxiety is a natural response to stress, but excessive worry can disrupt daily life.  
-        Learn to recognize symptoms like racing thoughts, restlessness, and tension.  
+        Anxiety is a natural response to stress, but excessive worry can disrupt daily life.
+        Learn to recognize symptoms like racing thoughts, restlessness, and tension.
         Practice grounding techniques and seek help when needed.
 
         🔗 [Read More from Mayo Clinic](https://www.mayoclinic.org/diseases-conditions/anxiety/symptoms-causes/syc-20350961)
         """)
     with st.expander("📌 Depression: What You Should Know"):
         st.markdown("""
-        Depression is more than sadness — it affects sleep, appetite, and motivation.  
+        Depression is more than sadness — it affects sleep, appetite, and motivation.
         Early support can prevent worsening. Talking to someone and seeking help is brave.
 
         🔗 [More from WHO](https://www.who.int/news-room/fact-sheets/detail/depression)
         """)
     with st.expander("📌 Stress Management Strategies"):
         st.markdown("""
-        Not all stress is bad. But chronic stress can weaken your immune system.  
+        Not all stress is bad. But chronic stress can weaken your immune system.
         Tips include deep breathing, stretching, reducing caffeine, and healthy boundaries.
 
         📘 Try this quick exercise: *Name 3 things you can see, hear, and feel right now.*
 
         🔗 [Stress Coping Tools - APA](https://www.apa.org/topics/stress)
         """)
-    # TODO: Placeholder for AI Recommendation Engine:
     st.markdown("---")
     st.info("💡 **AI Tip:** In the future, this section could recommend articles based on your interactions with the AI Helper or forum!")
 
     # Section 3: External Resources
     st.subheader("🌐 Trusted Mental Health Resources")
-
     st.markdown("""
     - [Mental Health Foundation (UK)](https://www.mentalhealth.org.uk/)
     - [Mind.org.uk](https://www.mind.org.uk/)
@@ -411,62 +456,108 @@ def educational_hub_page():
     """)
 
     # Optional PDF Resource (ensure 'resources/self-care-guide.pdf' exists)
-    try:
-        with open("resources/self-care-guide.pdf", "rb") as file:
+    # Ensure 'resources' directory exists and self-care-guide.pdf is placed there.
+    # To run this part, create a folder named 'resources' in the same directory as your app.py
+    # and place your PDF file named 'self-care-guide.pdf' inside it.
+    resources_dir = "resources"
+    pdf_path = os.path.join(resources_dir, "self-care-guide.pdf")
+
+    if os.path.exists(pdf_path):
+        with open(pdf_path, "rb") as file:
             st.download_button(label="Download Self-Care Guide (PDF)", data=file,
                                file_name="self-care-guide.pdf", mime="application/pdf")
-    except FileNotFoundError:
-        st.warning("Self-Care Guide PDF not found. Please create a 'resources' folder and place 'self-care-guide.pdf' inside it to enable download.")
+    else:
+        st.warning(
+            f"Self-Care Guide PDF not found at '{pdf_path}'. Please create a '{resources_dir}' folder and place 'self-care-guide.pdf' inside it to enable download.")
 
-# --- Professional Volunteer Directory (Mock-Up) Page ---
+# --- Professional Volunteer Directory Page ---
 
 
 def volunteers_page():
-    """Renders the mock professional volunteer directory."""
-    st.title("🤝 Professional Volunteers Directory (Mock-Up)")
+    """Renders the professional volunteer directory with registration."""
+    st.title("🤝 Professional Volunteers Directory")
     st.markdown(
-        "Explore profiles of mock mental health professionals. These profiles are for **demonstration purposes only**.")
+        "Connect with mental health professionals who have registered to offer support. You can add new volunteers here.")
 
-    st.info("⚠️ **Disclaimer:** This is a mock directory. WeCare does not directly offer professional services or endorse specific individuals. All volunteers here are for demonstration only. Always seek independent verification and professional advice for your mental health needs.")
+    # Volunteer Registration Form
+    st.subheader("➕ Register a New Volunteer")
+    with st.form("volunteer_registration_form", clear_on_submit=True):
+        name = st.text_input("Full Name of Volunteer")
+        role = st.text_input(
+            "Role/Expertise (e.g., Clinical Psychologist, Addiction Counsellor)")
+        bio = st.text_area("Brief Biography/Specialization")
+        image_file = st.file_uploader(
+            "Upload Profile Image (JPG, JPEG, PNG)", type=["jpg", "jpeg", "png"])
+        submitted = st.form_submit_button(
+            "Register Volunteer")  # No 'key' here
 
-    st.subheader("Featured Mock Professionals")
+        if submitted:
+            if not name or not role or not bio:
+                st.warning("Please fill in all text fields.")
+            elif not image_file:
+                st.warning("Please upload a profile image.")
+            else:
+                try:
+                    # Create directory if it doesn't exist
+                    os.makedirs("volunteer_images", exist_ok=True)
+                    # Save image
+                    img_path = os.path.join(
+                        "volunteer_images", image_file.name)
+                    with open(img_path, "wb") as f:
+                        f.write(image_file.getbuffer())
 
-    # Example mock profiles
-    mock_professionals = [
-        {
-            "Name": "Dr. Aisha Khan",
-            "Role": "Clinical Psychologist",
-            "Bio": "Specializes in cognitive-behavioral therapy (CBT) for anxiety and depression. Passionate about destigmatizing mental health conversations.",
-        },
-        {
-            "Name": "Mr. David Omondi",
-            "Role": "Addiction Counsellor",
-            "Bio": "Experienced in supporting individuals and families through addiction recovery journeys, focusing on holistic well-being.",
-        },
-        {
-            "Name": "Ms. Sarah Wanjiku",
-            "Role": "Trauma-Informed Therapist",
-            "Bio": "Dedicated to helping individuals process and heal from past trauma, using compassionate and evidence-based approaches.",
-        },
-    ]
+                    add_volunteer(name, role, bio, img_path)
+                    st.success(f"Volunteer '{name}' registered successfully!")
+                    st.rerun()  # Rerun to display the new volunteer
+                except Exception as e:
+                    st.error(f"Error registering volunteer: {e}")
 
-    for i, prof in enumerate(mock_professionals):
-        st.markdown("---")
-        col1, col2 = st.columns([1, 3])
-        with col1:
-            st.image("https://via.placeholder.com/100/ADD8E6/000000?text=PROF",
-                     caption=prof["Name"])  # Placeholder image
-        with col2:
-            st.subheader(prof["Name"])
-            st.write(f"**Role:** {prof['Role']}")
-            st.write(f"**Bio:** {prof['Bio']}")
-            # Mock contact button
-            st.button(f"Mock Contact {prof['Name']}", key=f"contact_prof_{i}")
+    st.divider()
+    st.subheader("👥 Registered Volunteers")
+
+    volunteers = get_volunteers()
+    if not volunteers:
+        st.info("No volunteers registered yet. Be the first to add one!")
+    else:
+        for name, role, bio, img_path, timestamp in volunteers:
+            st.markdown("---")
+            col1, col2 = st.columns([1, 3])
+            with col1:
+                if os.path.exists(img_path):
+                    st.image(img_path, width=100, caption=name)
+                else:
+                    st.image("https://via.placeholder.com/100/ADD8E6/000000?text=NO+IMAGE",
+                             caption=f"{name} (Image Missing)", width=100)
+            with col2:
+                st.markdown(f"**{name}** — *{role}*")
+                st.markdown(bio)
+                st.caption(
+                    f"Joined: {datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S').strftime('%b %d, %Y at %I:%M %p')}")
+                # The 'key' argument for st.button is still fine outside of st.form_submit_button within a form
+                st.button(
+                    f"Contact {name}", key=f"contact_{name}_{datetime.now().timestamp()}")
+                st.write("")  # Add a bit of space
 
     st.markdown("---")
-    st.write("For real professional help, please consult verified directories or your local health services.")
+    st.info("⚠️ **Disclaimer:** This directory is for informational purposes. WeCare facilitates connections but does not directly endorse or verify individual credentials. Always conduct your own due diligence and seek independent professional advice.")
 
-# --- Main Application Logic (from app.py) ---
+# --- Main Application Logic ---
+
+
+def homepage():
+    """A simple welcome page after login."""
+    st.title("🏡 Home: Your Sanctuary")
+    st.markdown(
+        f"Welcome, **{st.session_state.username}**! WeCare is here to support your mental well-being and addiction recovery journey.")
+    st.markdown("""
+    This platform offers a safe and non-judgmental space to connect, learn, and grow.
+    Use the menu on the left to navigate:
+    - **🤖 AI Helper:** Chat with our empathetic AI for immediate support and guidance.
+    - **🫂 Peer Support Forum:** Share your experiences and connect with others.
+    - **📚 Educational Hub:** Explore articles, videos, and resources to empower yourself.
+    - **🤝 Volunteers Directory:** Connect with professional volunteers.
+    """)
+    st.info("Remember, you are not alone. Take a moment to breathe, and explore the resources available to you.")
 
 
 def main():
@@ -492,7 +583,7 @@ def main():
 
         # Define pages for logged-in users
         pages = {
-            "Home": homepage,  # A simple homepage for now
+            "Home": homepage,
             "AI Helper": ai_helper_page,
             "Peer Support Forum": forum_page,
             "Educational Hub": educational_hub_page,
@@ -516,23 +607,7 @@ def main():
             for key in ["logged_in", "username", "user_id", "user_role", "chat_history", "current_page"]:
                 st.session_state.pop(key, None)
             st.success("You have been successfully logged out.")
-            st.rerun()  # Rerun to redirect to login page
-
-
-def homepage():
-    """A simple welcome page after login."""
-    st.title("🏡 Home: Your Sanctuary")
-    st.markdown(
-        f"Welcome, **{st.session_state.username}**! WeCare is here to support your mental well-being and addiction recovery journey.")
-    st.markdown("""
-    This platform offers a safe and non-judgmental space to connect, learn, and grow.
-    Use the menu on the left to navigate:
-    - **🤖 AI Helper:** Chat with our empathetic AI for immediate support and guidance.
-    - **🫂 Peer Support Forum:** Share your experiences and connect with others.
-    - **📚 Educational Hub:** Explore articles, videos, and resources to empower yourself.
-    - **🤝 Volunteers Directory:** (Mock-up) See how we might connect you with professionals in the future.
-    """)
-    st.info("Remember, you are not alone. Take a moment to breathe, and explore the resources available to you.")
+            st.rerun()
 
 
 if __name__ == "__main__":
