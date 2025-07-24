@@ -5,3 +5,5 @@ numpy
 matplotlib
 seaborn
 scikit-learn
+openai
+firebase-admin
